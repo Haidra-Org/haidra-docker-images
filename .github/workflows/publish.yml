@@ -1,0 +1,72 @@
+name: Create and publish a Docker image
+
+# Configures this workflow to run every time a change is pushed to the branch called `release`.
+on:
+  push:
+    branches: ['release']
+    paths:
+      - 'ai-horde/**'
+      # - 'haidra/**'
+
+# Defines two custom environment variables for the workflow. These are used for the Container registry domain, and a name for the Docker image that this workflow builds.
+env:
+  REGISTRY: ghcr.io
+  OWNER: ${{ github.repository_owner }}
+
+# There is a single job in this workflow. It's configured to run on the latest available version of Ubuntu.
+jobs:
+  changed:
+    runs-on: ubuntu-latest
+    outputs:
+      tobuild: ${{ steps.filter.outputs.changes }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Filter paths
+        uses: dorny/paths-filter@4512585405083f25c027a35db413c2b3b9006d50
+        id: filter
+        with:
+          filters: |
+            ./ai-horde/postgres:
+              - 'ai-horde/postgres/**'
+            # ./haidra/frontend:
+              # - 'haidra/frontend/**'
+
+  build-and-push-image:
+    needs: changed
+    if: ${{ needs.changed.outputs.tobuild != '[]' }}
+    runs-on: ubuntu-latest
+    # Sets the permissions granted to the `GITHUB_TOKEN` for the actions in this job.
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    strategy:
+      matrix:
+        context: ${{ fromJson(needs.changed.outputs.tobuild) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      # Uses the `docker/login-action` action to log in to the Container registry registry using the account and password that will publish the packages. Once published, the packages are scoped to the account defined here.
+      - name: Log in to the Container registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker images with Bake
+        uses: docker/bake-action@v2
+        id: push
+        with:
+          # Use context to determine where this docker-bake.hcl is located
+          files: "${{ matrix.context }}/docker-bake.hcl"
+          push: true
+      
+      # - name: Generate artifact attestation
+      #   uses: actions/attest-build-provenance@v1
+      #   with:
+      #     subject-name: ${{ env.REGISTRY }}/${{ env.OWNER }}/ai-horde-postgres
+      #     subject-digest: ${{ steps.push.outputs.digest }}
+      #     push-to-registry: true
