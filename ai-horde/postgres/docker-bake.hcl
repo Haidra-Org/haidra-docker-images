@@ -1,5 +1,5 @@
 variable "REPO_OWNER" {
-  default = "tazlin"
+  default = "haidra-org"
 }
 
 variable "INTENDED_PROJECT" {
