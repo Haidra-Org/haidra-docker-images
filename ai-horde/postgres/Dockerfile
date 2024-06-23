@@ -33,3 +33,5 @@ RUN echo "shared_preload_libraries = 'pg_cron'" >> /usr/share/postgresql/postgre
 
 # Set listen_addresses to '*' to allow connections from any IP
 RUN echo "listen_addresses = '*'" >> /usr/share/postgresql/postgresql.conf.sample
+
+COPY ./init_pg_cron.sql /docker-entrypoint-initdb.d/init_pg_cron.sql
