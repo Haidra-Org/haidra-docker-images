@@ -31,4 +31,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Add pg_cron extension to the database
 RUN echo "shared_preload_libraries = 'pg_cron'" >> /usr/share/postgresql/postgresql.conf.sample
 
-CMD ["postgres"]
+# Set listen_addresses to '*' to allow connections from any IP
+RUN echo "listen_addresses = '*'" >> /usr/share/postgresql/postgresql.conf.sample
