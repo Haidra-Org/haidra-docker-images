@@ -1,37 +1,35 @@
-FROM postgres:15
+ARG PG_MAJOR=18
 
-# Install pg_cron and everything required to build it
-RUN apt-get update && apt-get install -y --no-install-recommends \
+FROM postgres:${PG_MAJOR} AS builder
+
+ARG PG_MAJOR
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
         build-essential \
-        make \
-        gcc \
         ca-certificates \
         git \
-        postgresql-server-dev-15 \
-    && mkdir /build_ext \
-    && cd /build_ext \
-    && git clone https://github.com/citusdata/pg_cron \
-    && cd pg_cron \
-    && export PATH=/usr/lib/postgresql/15/bin:$PATH \
+        postgresql-server-dev-${PG_MAJOR} \
+    && PG_CRON_TAG="$(git ls-remote --refs --tags https://github.com/citusdata/pg_cron.git \
+        | awk -F/ '{print $3}' \
+        | sort -V \
+        | tail -n 1)" \
+    && test -n "${PG_CRON_TAG}" \
+    && git clone --depth 1 --branch "${PG_CRON_TAG}" https://github.com/citusdata/pg_cron /build/pg_cron \
+    && cd /build/pg_cron \
     && make \
-    && make install \
-    && cp /build_ext/pg_cron/pg_cron.so /usr/lib/postgresql/15/bin/pg_cron \
-    && apt-get remove -y --purge \
-        build-essential \
-        make \
-        gcc \
-        ca-certificates \
-        git \
-        postgresql-server-dev-15 \
-    && apt-get autoremove -y \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -rf /build_ext
+    && make install
 
-# Add pg_cron extension to the database
-RUN echo "shared_preload_libraries = 'pg_cron'" >> /usr/share/postgresql/postgresql.conf.sample
+FROM postgres:${PG_MAJOR}
 
-# Set listen_addresses to '*' to allow connections from any IP
-RUN echo "listen_addresses = '*'" >> /usr/share/postgresql/postgresql.conf.sample
+ARG PG_MAJOR
 
-COPY ./init_pg_cron.sql /docker-entrypoint-initdb.d/init_pg_cron.sql
+COPY --from=builder /usr/lib/postgresql/${PG_MAJOR}/lib/pg_cron.so \
+                    /usr/lib/postgresql/${PG_MAJOR}/lib/
+COPY --from=builder /usr/share/postgresql/${PG_MAJOR}/extension/pg_cron* \
+                    /usr/share/postgresql/${PG_MAJOR}/extension/
+
+RUN echo "shared_preload_libraries = 'pg_cron'" >> /usr/share/postgresql/postgresql.conf.sample \
+    && echo "listen_addresses = '*'" >> /usr/share/postgresql/postgresql.conf.sample
+
+COPY init_pg_cron.sql /docker-entrypoint-initdb.d/

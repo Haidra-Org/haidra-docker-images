@@ -1,0 +1,121 @@
+name: Check upstream freshness and open PR
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Weekly on Monday at 6:00 AM UTC
+  workflow_dispatch:
+
+env:
+  LOCK_FILE: ai-horde/postgres/upstream-digests.lock.json
+
+# Keep the pg_version matrix in sync with PG_VERSIONS in ai-horde/postgres/docker-bake.hcl
+jobs:
+  check-and-signal:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Refresh upstream digest lock file
+        id: refresh
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          versions=(14 15 16 17 18)
+          lock_file="${{ env.LOCK_FILE }}"
+          temp_file="$(mktemp)"
+
+          if [ -f "$lock_file" ]; then
+            cp "$lock_file" "$temp_file"
+          else
+            echo "{}" > "$temp_file"
+          fi
+
+          changed_versions=()
+
+          for version in "${versions[@]}"; do
+            upstream_digest=$(skopeo inspect --raw "docker://docker.io/library/postgres:${version}" \
+              | jq -r '.manifests[] | select(.platform.architecture == "amd64" and .platform.os == "linux") | .digest')
+            current_digest=$(jq -r --arg version "$version" '.[$version] // empty' "$temp_file")
+
+            if [ "$upstream_digest" != "$current_digest" ]; then
+              changed_versions+=("pg${version}")
+            fi
+
+            temp_update="$(mktemp)"
+            jq --arg version "$version" --arg digest "$upstream_digest" '.[$version] = $digest' "$temp_file" > "$temp_update"
+            mv "$temp_update" "$temp_file"
+          done
+
+          jq -S '.' "$temp_file" > "$lock_file"
+          rm -f "$temp_file"
+
+          if git diff --quiet -- "$lock_file"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "changed_versions=none" >> "$GITHUB_OUTPUT"
+            echo "No upstream digest changes found."
+            exit 0
+          fi
+
+          changed_versions_csv="$(IFS=', '; echo "${changed_versions[*]}")"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "changed_versions=${changed_versions_csv}" >> "$GITHUB_OUTPUT"
+          echo "Upstream digest updates detected for: ${changed_versions_csv}"
+
+      - name: Check for existing freshness PR
+        id: freshness-pr
+        if: steps.refresh.outputs.changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = 'chore/postgres-upstream-digest-refresh';
+            const title = 'chore(postgres): refresh upstream digest lock';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = `${owner}:${branch}`;
+
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              head,
+              per_page: 100,
+            });
+
+            const match = prs.find((pr) => pr.title === title) ?? prs[0];
+            core.setOutput('exists', String(Boolean(match)));
+            core.setOutput('url', match?.html_url ?? '');
+
+            if (match) {
+              core.info(`Existing freshness PR found: ${match.html_url}`);
+            } else {
+              core.info('No existing freshness PR found.');
+            }
+
+      - name: Skip because freshness PR already exists
+        if: steps.refresh.outputs.changed == 'true' && steps.freshness-pr.outputs.exists == 'true'
+        run: |
+          echo "Skipping PR creation. Existing freshness PR: ${{ steps.freshness-pr.outputs.url }}"
+
+      - name: Open freshness signal PR
+        if: steps.refresh.outputs.changed == 'true' && steps.freshness-pr.outputs.exists != 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/postgres-upstream-digest-refresh
+          delete-branch: true
+          commit-message: "chore(postgres): refresh upstream digest lock"
+          title: "chore(postgres): refresh upstream digest lock"
+          body: |
+            ## Freshness signal
+
+            Upstream postgres base image digests changed for: ${{ steps.refresh.outputs.changed_versions }}.
+
+            This PR updates ai-horde/postgres/upstream-digests.lock.json so artifact updates are explicit and reviewable.
+            Merging this PR will trigger publish and rebuild updated images.
+          labels: |
+            maintenance
+            docker
